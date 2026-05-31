@@ -19,7 +19,7 @@ Ikuti langkah-langkah di bawah ini untuk menjalankan proyek ini di komputer loka
 ### 1. Kloning atau Buat Folder Proyek
 Pastikan Anda berada di dalam direktori proyek:
 ```bash
-cd fastapi-crud-nol
+cd todo_list_api
 
 ```
 
