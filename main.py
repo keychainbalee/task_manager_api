@@ -1,89 +1,142 @@
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Generator
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 
-app = FastAPI(title="To-Do List API v2")
+# CONSTANT & CONFIGURATION DATABASE
+# Alamat file database SQLite yang akan dibuat otomatis
+DATABASE_URL = "sqlite:///./todos.db"
 
-# Simulasi Database menggunakan List of Dictionary
-todo_db = [
-    {"id": 1, "task": "Belajar routing FastAPI", "priority": "High", "is_completed": False},
-    {"id": 2, "task": "Beli kopi untuk ngoding", "priority": "Medium", "is_completed": True}
-]
+# Engine untuk menghubungkan kode dengan SQLite
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
-# Skema utama untuk validasi data yang masuk
-class TodoItem(BaseModel):
+# Session untuk berinteraksi (tambah, baca, hapus) dengan database
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Base class untuk membuat model tabel
+Base = declarative_base()
+
+
+# MODEL DATABASE (Tabel Asli di SQLite)
+class TodoModel(Base):
+    __tablename__ = "todos"  # Nama tabel di dalam database
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    task = Column(String, index=True)
+    priority = Column(String)
+    is_completed = Column(Boolean, default=False)
+
+
+# Buat tabelnya secara otomatis 
+Base.metadata.create_all(bind=engine)
+
+
+# PYDANTIC SCHEMAS (Validasi Request/Response)
+# Skema untuk menerima data baru
+class TodoCreate(BaseModel):
+    task: str
+    priority: str
+    is_completed: bool = False
+
+# Skema untuk mengirim respon balik ke klien 
+class TodoResponse(BaseModel):
     id: int
     task: str
-    priority: str  # Contoh: High, Medium, Low
-    is_completed: bool = False
+    priority: str
+    is_completed: bool
+
+    class Config:
+        from_attributes = True
+
+
+# DEPENDENCY (Fungsi Penghubung Database)
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# INITIALIZATION FASTAPI
+app = FastAPI(title="To-Do List API dengan SQLite")
+
+
+# ENDPOINTS 
+
+# GET ALL
+@app.get("/todos", response_model=list[TodoResponse], status_code=status.HTTP_200_OK)
+def get_all_todos(db: Session = Depends(get_db)):
+    todos = db.query(TodoModel).all()
+    return todos
+
+
+# GET BY ID
+@app.get("/todos/{todo_id}", response_model=TodoResponse, status_code=status.HTTP_200_OK)
+def get_todo_by_id(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+    return todo
+
+
+# POST
+@app.post("/todos", response_model=TodoResponse, status_code=status.HTTP_201_CREATED)
+def create_todo(new_item: TodoCreate, db: Session = Depends(get_db)):
+    # Ubah data dari Pydantic menjadi format Model Database
+    db_todo = TodoModel(**new_item.model_dump())
     
-# GET ALL: Melihat semua tugas
-@app.get("/todos", status_code=status.HTTP_200_OK)
-def get_all_todos():
-    return {"status": "success", "data": todo_db}
+    db.add(db_todo)      # Daftarkan data baru ke database
+    db.commit()          # Simpan permanen
+    db.refresh(db_todo)  # Ambil data terbaru (termasuk ID yang digenerate otomatis)
+    return db_todo
 
-# GET BY ID: Melihat satu tugas spesifik
-@app.get("/todos/{todo_id}", status_code=status.HTTP_200_OK)
-def get_todo_by_id(todo_id: int):
-    for item in todo_db:
-        if item["id"] == todo_id:
-            return {"status": "success", "data": item}
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
 
-# POST: Menambahkan tugas baru
-@app.post("/todos", status_code=status.HTTP_201_CREATED)
-def create_todo(new_item: TodoItem):
-    # Validasi: Pastikan ID tidak duplikat
-    for item in todo_db:
-        if item["id"] == new_item.id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID sudah ada")
+# PUT
+@app.put("/todos/{todo_id}", response_model=TodoResponse, status_code=status.HTTP_200_OK)
+def update_todo_total(todo_id: int, updated_item: TodoCreate, db: Session = Depends(get_db)):
+    todo_query = db.query(TodoModel).filter(TodoModel.id == todo_id)
+    todo = todo_query.first()
     
-    # Masukkan ke database simulasi
-    todo_db.append(new_item.model_dump())
-    return {"status": "success", "message": "Tugas berhasil ditambahkan", "data": new_item}
+    if not todo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+        
+    todo_query.update(updated_item.model_dump(), synchronize_session=False)
+    db.commit()
+    return todo_query.first()
 
-# PUT: Mengupdate seluruh data tugas
-@app.put("/todos/{todo_id}", status_code=status.HTTP_200_OK)
-def update_todo_total(todo_id: int, updated_item: TodoItem):
-    for index, item in enumerate(todo_db):
-        if item["id"] == todo_id:
-            # Timpa data lama dengan data baru yang dikirim klien
-            todo_db[index] = updated_item.model_dump()
-            todo_db[index]["id"] = todo_id  # Mengunci agar ID tetap sama dengan URL
-            return {"status": "success", "message": "Tugas berhasil diperbarui secara total"}
-            
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
 
-# Skema khusus PATCH (semua field opsional)
+# PATCH
 class TodoPatch(BaseModel):
     task: Optional[str] = None
     priority: Optional[str] = None
     is_completed: Optional[bool] = None
 
-# PATCH: Mengubah status atau sebagian data tugas
-@app.patch("/todos/{todo_id}", status_code=status.HTTP_200_OK)
-def update_todo_partial(todo_id: int, partial_data: TodoPatch):
-    for index, item in enumerate(todo_db):
-        if item["id"] == todo_id:
-            current_item = todo_db[index]
-            
-            # Ambil data yang dikirim saja (abaikan yang bernilai None)
-            incoming_data = partial_data.model_dump(exclude_unset=True)
-            
-            # Perbarui field yang dikirim saja
-            current_item.update(incoming_data)
-            
-            todo_db[index] = current_item
-            return {"status": "success", "message": "Sebagian data tugas berhasil diubah", "data": current_item}
-            
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+@app.patch("/todos/{todo_id}", response_model=TodoResponse, status_code=status.HTTP_200_OK)
+def update_todo_partial(todo_id: int, partial_data: TodoPatch, db: Session = Depends(get_db)):
+    todo_query = db.query(TodoModel).filter(TodoModel.id == todo_id)
+    todo = todo_query.first()
+    
+    if not todo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+        
+    # Ambil data yang dikirim saja
+    incoming_data = partial_data.model_dump(exclude_unset=True)
+    
+    todo_query.update(incoming_data, synchronize_session=False)
+    db.commit()
+    return todo_query.first()
 
-# DELETE: Menghapus tugas
+
+# DELETE
 @app.delete("/todos/{todo_id}", status_code=status.HTTP_200_OK)
-def delete_todo(todo_id: int):
-    for index, item in enumerate(todo_db):
-        if item["id"] == todo_id:
-            todo_db.pop(index)
-            return {"status": "success", "message": f"Tugas dengan ID {todo_id} berhasil dihapus"}
-            
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    if not todo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tugas tidak ditemukan")
+        
+    db.delete(todo)
+    db.commit()
+    return {"status": "success", "message": f"Tugas dengan ID {todo_id} berhasil dihapus"}
